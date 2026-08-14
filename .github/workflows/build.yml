@@ -1,10 +1,10 @@
-name: Build A37 Payload from Drive
+name: Build A37 Payload
 
 on:
   workflow_dispatch:
     inputs:
       build_number:
-        description: 'Build number (e.g., A376BXXU1AZB7)'
+        description: 'Build number'
         required: true
         default: 'A376BXXU1AZB7'
 
@@ -33,31 +33,35 @@ jobs:
       run: |
         git clone https://github.com/abdgalaxy36-code/Root-My-Galaxy-Payloads.git payload-repo
 
-    - name: Download firmware from Google Drive
+    - name: Extract symbols from kernel
       run: |
-        wget --no-check-certificate 'https://docs.google.com/uc?export=download&id=1D5HwUj6wtYUvqV--e9UBcFKajkEByMc_' -O firmware.zip
-        unzip firmware.zip
-
-    - name: Extract kernel from firmware
-      run: |
-        AP_FILE=$(ls AP_*.tar.md5 2>/dev/null | head -1)
-        if [ -z "$AP_FILE" ]; then
-          echo "No AP file found!"
-          exit 1
-        fi
-        tar -xf "$AP_FILE" boot.img.lz4
-        lz4 -d boot.img.lz4 boot.img
-        python3 << 'PYEOF'
-        from pathlib import Path
-        import struct
-        boot = Path("boot.img").read_bytes()
-        kernel_size = struct.unpack_from("<I", boot, 0x08)[0]
-        kernel = boot[0x1000:0x1000 + kernel_size]
-        Path("kernel").write_bytes(kernel)
-        print("Kernel extracted")
-        PYEOF
         vmlinux-to-elf kernel vmlinux.elf
         llvm-nm --numeric-sort vmlinux.elf > vmlinux.nm
+
+    - name: Extract BTF from kernel
+      run: |
+        python3 << 'PYEOF'
+        import struct
+        with open('kernel', 'rb') as f:
+            data = f.read()
+        btf_magic = b'\x9f\xeb\x01\x00'
+        offset = data.find(btf_magic)
+        if offset != -1:
+            header = data[offset:offset+24]
+            magic, version, flags, header_len, type_off, type_len, str_off, str_len = struct.unpack('<HBBIIIII', header)
+            total_size = header_len + type_off + type_len + str_off + str_len
+            btf_data = data[offset:offset+total_size]
+            with open('vmlinux.btf', 'wb') as f:
+                f.write(btf_data)
+            print("BTF extracted successfully")
+        else:
+            print("No BTF found")
+        PYEOF
+
+    - name: Extract offsets
+      run: |
+        grep -E "call_usermodehelper_exec_work|noop_llseek|generic_file_splice_read|configfs_read_iter|configfs_bin_write_iter|ashmem_ioctl|ashmem_compat_ioctl|ashmem_mmap|ashmem_open|ashmem_release|ashmem_show_fdinfo|anon_pipe_buf_ops|ashmem_fops|nfnetlink_log|kmalloc_caches|system_unbound_wq|nfulnl_logger|init_task|root_task_group|selinux_enforcing|sysctl_bootid" vmlinux.nm > offsets.txt
+        cat offsets.txt
 
     - name: Build payload
       run: |
