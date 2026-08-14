@@ -1,0 +1,71 @@
+name: Build A37 Payload from Drive
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_number:
+        description: 'Build number (e.g., A376BXXU1AZB7)'
+        required: true
+        default: 'A376BXXU1AZB7'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y python3-pip lz4
+        pip3 install vmlinux-to-elf
+
+    - name: Setup NDK
+      run: |
+        wget https://dl.google.com/android/repository/android-ndk-r29-linux.zip
+        unzip android-ndk-r29-linux.zip
+        echo "ANDROID_NDK_HOME=$PWD/android-ndk-r29" >> $GITHUB_ENV
+        echo "$PWD/android-ndk-r29/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
+
+    - name: Clone payload repository
+      run: |
+        git clone https://github.com/abdgalaxy36-code/Root-My-Galaxy-Payloads.git payload-repo
+
+    - name: Download firmware from Google Drive
+      run: |
+        wget --no-check-certificate 'https://docs.google.com/uc?export=download&id=1D5HwUj6wtYUvqV--e9UBcFKajkEByMc_' -O firmware.zip
+        unzip firmware.zip
+
+    - name: Extract kernel from firmware
+      run: |
+        AP_FILE=$(ls AP_*.tar.md5 2>/dev/null | head -1)
+        if [ -z "$AP_FILE" ]; then
+          echo "No AP file found!"
+          exit 1
+        fi
+        tar -xf "$AP_FILE" boot.img.lz4
+        lz4 -d boot.img.lz4 boot.img
+        python3 << 'PYEOF'
+        from pathlib import Path
+        import struct
+        boot = Path("boot.img").read_bytes()
+        kernel_size = struct.unpack_from("<I", boot, 0x08)[0]
+        kernel = boot[0x1000:0x1000 + kernel_size]
+        Path("kernel").write_bytes(kernel)
+        print("Kernel extracted")
+        PYEOF
+        vmlinux-to-elf kernel vmlinux.elf
+        llvm-nm --numeric-sort vmlinux.elf > vmlinux.nm
+
+    - name: Build payload
+      run: |
+        cd payload-repo
+        make TARGET=a37-${{ github.event.inputs.build_number }} ANDROID_NDK_HOME=$ANDROID_NDK_HOME release
+
+    - name: Upload payload
+      uses: actions/upload-artifact@v4
+      with:
+        name: a37-payload
+        path: payload-repo/build/a37-${{ github.event.inputs.build_number }}/cve-2026-43499-app.release.so
